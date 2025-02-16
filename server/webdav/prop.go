@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"path"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/alist-org/alist/v3/internal/model"
 )
@@ -384,7 +386,11 @@ func findLastModified(ctx context.Context, ls LockSystem, name string, fi model.
 	return fi.ModTime().UTC().Format(http.TimeFormat), nil
 }
 func findCreationDate(ctx context.Context, ls LockSystem, name string, fi model.Obj) (string, error) {
-	return fi.CreateTime().UTC().Format(http.TimeFormat), nil
+	userAgent := ctx.Value("userAgent").(string)
+	if strings.Contains(strings.ToLower(userAgent), "microsoft-webdav") {
+		return fi.CreateTime().UTC().Format(http.TimeFormat), nil
+	}
+	return fi.CreateTime().UTC().Format(time.RFC3339), nil
 }
 
 // ErrNotImplemented should be returned by optional interfaces if they
@@ -460,7 +466,7 @@ type ETager interface {
 func findETag(ctx context.Context, ls LockSystem, name string, fi model.Obj) (string, error) {
 	if do, ok := fi.(ETager); ok {
 		etag, err := do.ETag(ctx)
-		if err != ErrNotImplemented {
+		if !errors.Is(err, ErrNotImplemented) {
 			return etag, err
 		}
 	}

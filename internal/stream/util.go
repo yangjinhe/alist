@@ -3,20 +3,20 @@ package stream
 import (
 	"context"
 	"fmt"
-	"github.com/alist-org/alist/v3/internal/errs"
+	"github.com/alist-org/alist/v3/pkg/utils"
+	"io"
+	"net/http"
+
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/internal/net"
 	"github.com/alist-org/alist/v3/pkg/http_range"
 	log "github.com/sirupsen/logrus"
-	"io"
-	"net/http"
 )
 
 func GetRangeReadCloserFromLink(size int64, link *model.Link) (model.RangeReadCloserIF, error) {
 	if len(link.URL) == 0 {
 		return nil, fmt.Errorf("can't create RangeReadCloser since URL is empty in link")
 	}
-	//remoteClosers := utils.EmptyClosers()
 	rangeReaderFunc := func(ctx context.Context, r http_range.Range) (io.ReadCloser, error) {
 		if link.Concurrency != 0 || link.PartSize != 0 {
 			header := net.ProcessHeader(http.Header{}, link.Header)
@@ -31,34 +31,29 @@ func GetRangeReadCloserFromLink(size int64, link *model.Link) (model.RangeReadCl
 				HeaderRef: header,
 			}
 			rc, err := down.Download(ctx, req)
-			if err != nil {
-				return nil, errs.NewErr(err, "GetReadCloserFromLink failed")
-			}
-			return rc, nil
+			return rc, err
 
 		}
-		if len(link.URL) > 0 {
-			response, err := RequestRangedHttp(ctx, link, r.Start, r.Length)
-			if err != nil {
-				return nil, fmt.Errorf("http request failure,status: %d err:%s", response.StatusCode, err)
+		response, err := RequestRangedHttp(ctx, link, r.Start, r.Length)
+		if err != nil {
+			if response == nil {
+				return nil, fmt.Errorf("http request failure, err:%s", err)
 			}
-			if r.Start == 0 && (r.Length == -1 || r.Length == size) || response.StatusCode == http.StatusPartialContent ||
-				checkContentRange(&response.Header, size, r.Start) {
-				return response.Body, nil
-			} else if response.StatusCode == http.StatusOK {
-				log.Warnf("remote http server not supporting range request, expect low perfromace!")
-				readCloser, err := net.GetRangedHttpReader(response.Body, r.Start, r.Length)
-				if err != nil {
-					return nil, err
-				}
-				return readCloser, nil
-
-			}
-
+			return nil, err
+		}
+		if r.Start == 0 && (r.Length == -1 || r.Length == size) || response.StatusCode == http.StatusPartialContent ||
+			checkContentRange(&response.Header, r.Start) {
 			return response.Body, nil
+		} else if response.StatusCode == http.StatusOK {
+			log.Warnf("remote http server not supporting range request, expect low perfromace!")
+			readCloser, err := net.GetRangedHttpReader(response.Body, r.Start, r.Length)
+			if err != nil {
+				return nil, err
+			}
+			return readCloser, nil
 		}
 
-		return nil, errs.NotSupport
+		return response.Body, nil
 	}
 	resultRangeReadCloser := model.RangeReadCloser{RangeReader: rangeReaderFunc}
 	return &resultRangeReadCloser, nil
@@ -72,13 +67,32 @@ func RequestRangedHttp(ctx context.Context, link *model.Link, offset, length int
 }
 
 // 139 cloud does not properly return 206 http status code, add a hack here
-func checkContentRange(header *http.Header, size, offset int64) bool {
-	r, err2 := http_range.ParseRange(header.Get("Content-Range"), size)
-	if err2 != nil {
-		log.Warnf("exception trying to parse Content-Range, will ignore,err=%s", err2)
+func checkContentRange(header *http.Header, offset int64) bool {
+	start, _, err := http_range.ParseContentRange(header.Get("Content-Range"))
+	if err != nil {
+		log.Warnf("exception trying to parse Content-Range, will ignore,err=%s", err)
 	}
-	if len(r) == 1 && r[0].Start == offset {
+	if start == offset {
 		return true
 	}
 	return false
+}
+
+type ReaderWithCtx struct {
+	io.Reader
+	Ctx context.Context
+}
+
+func (r *ReaderWithCtx) Read(p []byte) (n int, err error) {
+	if utils.IsCanceled(r.Ctx) {
+		return 0, r.Ctx.Err()
+	}
+	return r.Reader.Read(p)
+}
+
+func (r *ReaderWithCtx) Close() error {
+	if c, ok := r.Reader.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
 }

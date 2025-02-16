@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"github.com/alist-org/alist/v3/pkg/http_range"
 	"io"
 	"math"
 	"net/http"
@@ -16,6 +15,7 @@ import (
 	"github.com/alist-org/alist/v3/drivers/base"
 	"github.com/alist-org/alist/v3/internal/driver"
 	"github.com/alist-org/alist/v3/internal/model"
+	"github.com/alist-org/alist/v3/pkg/http_range"
 	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/avast/retry-go"
 	"github.com/go-resty/resty/v2"
@@ -77,7 +77,7 @@ func (d *AliyundriveOpen) uploadPart(ctx context.Context, r io.Reader, partInfo 
 	if err != nil {
 		return err
 	}
-	res.Body.Close()
+	_ = res.Body.Close()
 	if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusConflict {
 		return fmt.Errorf("upload status: %d", res.StatusCode)
 	}
@@ -126,7 +126,7 @@ func getProofRange(input string, size int64) (*ProofRange, error) {
 }
 
 func (d *AliyundriveOpen) calProofCode(stream model.FileStreamer) (string, error) {
-	proofRange, err := getProofRange(d.AccessToken, stream.GetSize())
+	proofRange, err := getProofRange(d.getAccessToken(), stream.GetSize())
 	if err != nil {
 		return "", err
 	}
@@ -136,7 +136,7 @@ func (d *AliyundriveOpen) calProofCode(stream model.FileStreamer) (string, error
 	if err != nil {
 		return "", err
 	}
-	_, err = io.CopyN(buf, reader, length)
+	_, err = utils.CopyWithBufferN(buf, reader, length)
 	if err != nil {
 		return "", err
 	}
@@ -148,9 +148,8 @@ func (d *AliyundriveOpen) upload(ctx context.Context, dstDir model.Obj, stream m
 	// Part Size Unit: Bytes, Default: 20MB,
 	// Maximum number of slices 10,000, ≈195.3125GB
 	var partSize = calPartSize(stream.GetSize())
-	const dateFormat = "2006-01-02T15:04:05.88Z"
-	mtime := stream.ModTime()
-	mtimeStr := mtime.UTC().Format(dateFormat)
+	const dateFormat = "2006-01-02T15:04:05.000Z"
+	mtimeStr := stream.ModTime().UTC().Format(dateFormat)
 	ctimeStr := stream.CreateTime().UTC().Format(dateFormat)
 
 	createData := base.Json{
@@ -165,7 +164,7 @@ func (d *AliyundriveOpen) upload(ctx context.Context, dstDir model.Obj, stream m
 	count := int(math.Ceil(float64(stream.GetSize()) / float64(partSize)))
 	createData["part_info_list"] = makePartInfos(count)
 	// rapid upload
-	rapidUpload := stream.GetSize() > 100*utils.KB && d.RapidUpload
+	rapidUpload := !stream.IsForceStreamUpload() && stream.GetSize() > 100*utils.KB && d.RapidUpload
 	if rapidUpload {
 		log.Debugf("[aliyundrive_open] start cal pre_hash")
 		// read 1024 bytes to calculate pre hash
@@ -243,14 +242,18 @@ func (d *AliyundriveOpen) upload(ctx context.Context, dstDir model.Obj, stream m
 			if remain := stream.GetSize() - offset; length > remain {
 				length = remain
 			}
-			//rd := utils.NewMultiReadable(io.LimitReader(stream, partSize))
-			rd, err := stream.RangeRead(http_range.Range{Start: offset, Length: length})
-			if err != nil {
-				return nil, err
+			rd := utils.NewMultiReadable(io.LimitReader(stream, partSize))
+			if rapidUpload {
+				srd, err := stream.RangeRead(http_range.Range{Start: offset, Length: length})
+				if err != nil {
+					return nil, err
+				}
+				rd = utils.NewMultiReadable(srd)
 			}
 			err = retry.Do(func() error {
-				//rd.Reset()
-				return d.uploadPart(ctx, rd, createResp.PartInfoList[i])
+				_ = rd.Reset()
+				rateLimitedRd := driver.NewLimitedUploadStream(ctx, rd)
+				return d.uploadPart(ctx, rateLimitedRd, createResp.PartInfoList[i])
 			},
 				retry.Attempts(3),
 				retry.DelayType(retry.BackOffDelay),
@@ -259,6 +262,7 @@ func (d *AliyundriveOpen) upload(ctx context.Context, dstDir model.Obj, stream m
 				return nil, err
 			}
 			offset += partSize
+			up(float64(i*100) / float64(count))
 		}
 	} else {
 		log.Debugf("[aliyundrive_open] rapid upload success, file id: %s", createResp.FileId)

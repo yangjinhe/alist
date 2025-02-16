@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alist-org/alist/v3/pkg/utils"
+
 	"github.com/alist-org/alist/v3/pkg/http_range"
 	log "github.com/sirupsen/logrus"
 )
@@ -327,10 +329,10 @@ func GetRangedHttpReader(readCloser io.ReadCloser, offset, length int64) (io.Rea
 	length_int = int(length)
 
 	if offset > 100*1024*1024 {
-		log.Warnf("offset is more than 100MB, if loading data from internet, high-latency and wasting of bandwith is expected")
+		log.Warnf("offset is more than 100MB, if loading data from internet, high-latency and wasting of bandwidth is expected")
 	}
 
-	if _, err := io.Copy(io.Discard, io.LimitReader(readCloser, offset)); err != nil {
+	if _, err := utils.CopyWithBuffer(io.Discard, io.LimitReader(readCloser, offset)); err != nil {
 		return nil, err
 	}
 

@@ -32,7 +32,7 @@ func CopyFile(src, dst string) error {
 	}
 	defer dstfd.Close()
 
-	if _, err = io.Copy(dstfd, srcfd); err != nil {
+	if _, err = CopyWithBuffer(dstfd, srcfd); err != nil {
 		return err
 	}
 	if srcinfo, err = os.Stat(src); err != nil {
@@ -121,12 +121,12 @@ func CreateTempFile(r io.Reader, size int64) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	readBytes, err := io.Copy(f, r)
+	readBytes, err := CopyWithBuffer(f, r)
 	if err != nil {
 		_ = os.Remove(f.Name())
 		return nil, errs.NewErr(err, "CreateTempFile failed")
 	}
-	if size != 0 && readBytes != size {
+	if size > 0 && readBytes != size {
 		_ = os.Remove(f.Name())
 		return nil, errs.NewErr(err, "CreateTempFile failed, incoming stream actual size= %d, expect = %d ", readBytes, size)
 	}
@@ -163,8 +163,15 @@ func GetObjType(filename string, isDir bool) int {
 	return GetFileType(filename)
 }
 
+var extraMimeTypes = map[string]string{
+	".apk": "application/vnd.android.package-archive",
+}
+
 func GetMimeType(name string) string {
 	ext := path.Ext(name)
+	if m, ok := extraMimeTypes[ext]; ok {
+		return m
+	}
 	m := mime.TypeByExtension(ext)
 	if m != "" {
 		return m

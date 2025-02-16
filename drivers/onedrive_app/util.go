@@ -71,8 +71,8 @@ func (d *OnedriveAPP) _accessToken() error {
 		"grant_type":    "client_credentials",
 		"client_id":     d.ClientID,
 		"client_secret": d.ClientSecret,
-		"resource":      "https://graph.microsoft.com/",
-		"scope":         "https://graph.microsoft.com/.default",
+		"resource":      onedriveHostMap[d.Region].Api + "/",
+		"scope":         onedriveHostMap[d.Region].Api + "/.default",
 	}).Post(url)
 	if err != nil {
 		return err
@@ -118,7 +118,7 @@ func (d *OnedriveAPP) Request(url string, method string, callback base.ReqCallba
 
 func (d *OnedriveAPP) getFiles(path string) ([]File, error) {
 	var res []File
-	nextLink := d.GetMetaUrl(false, path) + "/children?$top=5000&$expand=thumbnails($select=medium)&$select=id,name,size,lastModifiedDateTime,content.downloadUrl,file,parentReference"
+	nextLink := d.GetMetaUrl(false, path) + "/children?$top=1000&$expand=thumbnails($select=medium)&$select=id,name,size,lastModifiedDateTime,content.downloadUrl,file,parentReference"
 	for nextLink != "" {
 		var files Files
 		_, err := d.Request(nextLink, http.MethodGet, nil, &files)
@@ -140,12 +140,8 @@ func (d *OnedriveAPP) GetFile(path string) (*File, error) {
 
 func (d *OnedriveAPP) upSmall(ctx context.Context, dstDir model.Obj, stream model.FileStreamer) error {
 	url := d.GetMetaUrl(false, stdpath.Join(dstDir.GetPath(), stream.GetName())) + "/content"
-	data, err := io.ReadAll(stream)
-	if err != nil {
-		return err
-	}
-	_, err = d.Request(url, http.MethodPut, func(req *resty.Request) {
-		req.SetBody(data).SetContext(ctx)
+	_, err := d.Request(url, http.MethodPut, func(req *resty.Request) {
+		req.SetBody(driver.NewLimitedUploadStream(ctx, stream)).SetContext(ctx)
 	}, nil)
 	return err
 }
@@ -175,7 +171,7 @@ func (d *OnedriveAPP) upBig(ctx context.Context, dstDir model.Obj, stream model.
 		if err != nil {
 			return err
 		}
-		req, err := http.NewRequest("PUT", uploadUrl, bytes.NewBuffer(byteData))
+		req, err := http.NewRequest("PUT", uploadUrl, driver.NewLimitedUploadStream(ctx, bytes.NewBuffer(byteData)))
 		if err != nil {
 			return err
 		}
@@ -187,13 +183,14 @@ func (d *OnedriveAPP) upBig(ctx context.Context, dstDir model.Obj, stream model.
 		if err != nil {
 			return err
 		}
-		if res.StatusCode != 201 && res.StatusCode != 202 {
+		// https://learn.microsoft.com/zh-cn/onedrive/developer/rest-api/api/driveitem_createuploadsession
+		if res.StatusCode != 201 && res.StatusCode != 202 && res.StatusCode != 200 {
 			data, _ := io.ReadAll(res.Body)
 			res.Body.Close()
 			return errors.New(string(data))
 		}
 		res.Body.Close()
-		up(int(finish * 100 / stream.GetSize()))
+		up(float64(finish) * 100 / float64(stream.GetSize()))
 	}
 	return nil
 }

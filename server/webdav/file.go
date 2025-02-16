@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 
+	"github.com/alist-org/alist/v3/internal/conf"
 	"github.com/alist-org/alist/v3/internal/fs"
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/internal/op"
@@ -32,6 +33,13 @@ func moveFiles(ctx context.Context, src, dst string, overwrite bool) (status int
 	dstDir := path.Dir(dst)
 	srcName := path.Base(src)
 	dstName := path.Base(dst)
+	user := ctx.Value("user").(*model.User)
+	if srcDir != dstDir && !user.CanMove() {
+		return http.StatusForbidden, nil
+	}
+	if srcName != dstName && !user.CanRename() {
+		return http.StatusForbidden, nil
+	}
 	if srcDir == dstDir {
 		err = fs.Rename(ctx, src, dstName)
 	} else {
@@ -54,7 +62,8 @@ func moveFiles(ctx context.Context, src, dst string, overwrite bool) (status int
 //
 // See section 9.8.5 for when various HTTP status codes apply.
 func copyFiles(ctx context.Context, src, dst string, overwrite bool) (status int, err error) {
-	_, err = fs.Copy(ctx, src, dst)
+	dstDir := path.Dir(dst)
+	_, err = fs.Copy(context.WithValue(ctx, conf.NoTaskKey, struct{}{}), src, dstDir)
 	if err != nil {
 		return http.StatusInternalServerError, err
 	}

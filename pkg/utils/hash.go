@@ -8,10 +8,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"github.com/alist-org/alist/v3/internal/errs"
-	log "github.com/sirupsen/logrus"
 	"hash"
 	"io"
+
+	"github.com/alist-org/alist/v3/internal/errs"
+	log "github.com/sirupsen/logrus"
 )
 
 func GetMD5EncodeStr(data string) string {
@@ -29,7 +30,7 @@ type HashType struct {
 	Width   int
 	Name    string
 	Alias   string
-	NewFunc func() hash.Hash
+	NewFunc func(...any) hash.Hash
 }
 
 func (ht *HashType) MarshalJSON() ([]byte, error) {
@@ -57,7 +58,10 @@ var (
 
 // RegisterHash adds a new Hash to the list and returns its Type
 func RegisterHash(name, alias string, width int, newFunc func() hash.Hash) *HashType {
+	return RegisterHashWithParam(name, alias, width, func(a ...any) hash.Hash { return newFunc() })
+}
 
+func RegisterHashWithParam(name, alias string, width int, newFunc func(...any) hash.Hash) *HashType {
 	newType := &HashType{
 		Name:    name,
 		Alias:   alias,
@@ -83,16 +87,16 @@ var (
 )
 
 // HashData get hash of one hashType
-func HashData(hashType *HashType, data []byte) string {
-	h := hashType.NewFunc()
+func HashData(hashType *HashType, data []byte, params ...any) string {
+	h := hashType.NewFunc(params...)
 	h.Write(data)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
 // HashReader get hash of one hashType from a reader
-func HashReader(hashType *HashType, reader io.Reader) (string, error) {
-	h := hashType.NewFunc()
-	_, err := io.Copy(h, reader)
+func HashReader(hashType *HashType, reader io.Reader, params ...any) (string, error) {
+	h := hashType.NewFunc(params...)
+	_, err := CopyWithBuffer(h, reader)
 	if err != nil {
 		return "", errs.NewErr(err, "HashReader error")
 	}
@@ -100,8 +104,8 @@ func HashReader(hashType *HashType, reader io.Reader) (string, error) {
 }
 
 // HashFile get hash of one hashType from a model.File
-func HashFile(hashType *HashType, file io.ReadSeeker) (string, error) {
-	str, err := HashReader(hashType, file)
+func HashFile(hashType *HashType, file io.ReadSeeker, params ...any) (string, error) {
+	str, err := HashReader(hashType, file, params...)
 	if err != nil {
 		return "", err
 	}
@@ -180,6 +184,10 @@ type HashInfo struct {
 	h map[*HashType]string `json:"hashInfo"`
 }
 
+func NewHashInfoByMap(h map[*HashType]string) HashInfo {
+	return HashInfo{h}
+}
+
 func NewHashInfo(ht *HashType, str string) HashInfo {
 	m := make(map[*HashType]string)
 	if ht != nil {
@@ -213,4 +221,8 @@ func FromString(str string) HashInfo {
 }
 func (hi HashInfo) GetHash(ht *HashType) string {
 	return hi.h[ht]
+}
+
+func (hi HashInfo) Export() map[*HashType]string {
+	return hi.h
 }

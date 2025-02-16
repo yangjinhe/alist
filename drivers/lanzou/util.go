@@ -106,7 +106,8 @@ func (d *LanZou) request(url string, method string, callback base.ReqCallback, u
 	}
 
 	req.SetHeaders(map[string]string{
-		"Referer": "https://pc.woozooo.com",
+		"Referer":    "https://pc.woozooo.com",
+		"User-Agent": d.UserAgent,
 	})
 
 	if d.Cookie != "" {
@@ -258,10 +259,13 @@ var sizeFindReg = regexp.MustCompile(`(?i)大小\W*([0-9.]+\s*[bkm]+)`)
 var timeFindReg = regexp.MustCompile(`\d+\s*[秒天分小][钟时]?前|[昨前]天|\d{4}-\d{2}-\d{2}`)
 
 // 查找分享文件夹子文件夹ID和名称
-var findSubFolaerReg = regexp.MustCompile(`(?i)(?:folderlink|mbxfolder).+href="/(.+?)"(?:.+filename")?>(.+?)<`)
+var findSubFolderReg = regexp.MustCompile(`(?i)(?:folderlink|mbxfolder).+href="/(.+?)"(?:.+filename")?>(.+?)<`)
 
 // 获取下载页面链接
 var findDownPageParamReg = regexp.MustCompile(`<iframe.*?src="(.+?)"`)
+
+// 获取文件ID
+var findFileIDReg = regexp.MustCompile(`'/ajaxm\.php\?file=(\d+)'`)
 
 // 获取分享链接主界面
 func (d *LanZou) getShareUrlHtml(shareID string) (string, error) {
@@ -355,8 +359,16 @@ func (d *LanZou) getFilesByShareUrl(shareID, pwd string, sharePageData string) (
 			return nil, err
 		}
 		param["p"] = pwd
+
+		fileIDs := findFileIDReg.FindStringSubmatch(sharePageData)
+		var fileID string
+		if len(fileIDs) > 1 {
+			fileID = fileIDs[1]
+		} else {
+			return nil, fmt.Errorf("not find file id")
+		}
 		var resp FileShareInfoAndUrlResp[string]
-		_, err = d.post(d.ShareUrl+"/ajaxm.php", func(req *resty.Request) { req.SetFormData(param) }, &resp)
+		_, err = d.post(d.ShareUrl+"/ajaxm.php?file="+fileID, func(req *resty.Request) { req.SetFormData(param) }, &resp)
 		if err != nil {
 			return nil, err
 		}
@@ -380,8 +392,15 @@ func (d *LanZou) getFilesByShareUrl(shareID, pwd string, sharePageData string) (
 			return nil, err
 		}
 
+		fileIDs := findFileIDReg.FindStringSubmatch(nextPageData)
+		var fileID string
+		if len(fileIDs) > 1 {
+			fileID = fileIDs[1]
+		} else {
+			return nil, fmt.Errorf("not find file id")
+		}
 		var resp FileShareInfoAndUrlResp[int]
-		_, err = d.post(d.ShareUrl+"/ajaxm.php", func(req *resty.Request) { req.SetFormData(param) }, &resp)
+		_, err = d.post(d.ShareUrl+"/ajaxm.php?file="+fileID, func(req *resty.Request) { req.SetFormData(param) }, &resp)
 		if err != nil {
 			return nil, err
 		}
@@ -455,7 +474,7 @@ func (d *LanZou) getFolderByShareUrl(pwd string, sharePageData string) ([]FileOr
 
 	files := make([]FileOrFolderByShareUrl, 0)
 	// vip获取文件夹
-	floders := findSubFolaerReg.FindAllStringSubmatch(sharePageData, -1)
+	floders := findSubFolderReg.FindAllStringSubmatch(sharePageData, -1)
 	for _, floder := range floders {
 		if len(floder) == 3 {
 			files = append(files, FileOrFolderByShareUrl{
@@ -476,10 +495,10 @@ func (d *LanZou) getFolderByShareUrl(pwd string, sharePageData string) ([]FileOr
 		if err != nil {
 			return nil, err
 		}
-		/*// 文件夹中的文件也不加密
+		// 文件夹中的文件加密
 		for i := 0; i < len(resp.Text); i++ {
 			resp.Text[i].Pwd = pwd
-		}*/
+		}
 		if len(resp.Text) == 0 {
 			break
 		}
