@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/alist-org/alist/v3/pkg/http_range"
-	"github.com/rclone/rclone/lib/readers"
 	"io"
 	"time"
+
+	"github.com/alist-org/alist/v3/pkg/http_range"
+	"github.com/pquerna/otp/totp"
+	"github.com/rclone/rclone/lib/readers"
 
 	"github.com/alist-org/alist/v3/internal/driver"
 	"github.com/alist-org/alist/v3/internal/errs"
@@ -32,8 +34,16 @@ func (d *Mega) GetAddition() driver.Additional {
 }
 
 func (d *Mega) Init(ctx context.Context) error {
+	var twoFACode = d.TwoFACode
 	d.c = mega.New()
-	return d.c.Login(d.Email, d.Password)
+	if d.TwoFASecret != "" {
+		code, err := totp.GenerateCode(d.TwoFASecret, time.Now())
+		if err != nil {
+			return fmt.Errorf("generate totp code failed: %w", err)
+		}
+		twoFACode = code
+	}
+	return d.c.MultiFactorLogin(d.Email, d.Password, twoFACode)
 }
 
 func (d *Mega) Drop(ctx context.Context) error {
@@ -74,7 +84,6 @@ func (d *Mega) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*
 		//}
 
 		size := file.GetSize()
-		var finalClosers utils.Closers
 		resultRangeReader := func(ctx context.Context, httpRange http_range.Range) (io.ReadCloser, error) {
 			length := httpRange.Length
 			if httpRange.Length >= 0 && httpRange.Start+httpRange.Length >= size {
@@ -93,11 +102,10 @@ func (d *Mega) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*
 				d:    down,
 				skip: httpRange.Start,
 			}
-			finalClosers.Add(oo)
 
 			return readers.NewLimitedReadCloser(oo, length), nil
 		}
-		resultRangeReadCloser := &model.RangeReadCloser{RangeReader: resultRangeReader, Closers: finalClosers}
+		resultRangeReadCloser := &model.RangeReadCloser{RangeReader: resultRangeReader}
 		resultLink := &model.Link{
 			RangeReadCloser: resultRangeReadCloser,
 		}
@@ -148,6 +156,7 @@ func (d *Mega) Put(ctx context.Context, dstDir model.Obj, stream model.FileStrea
 			return err
 		}
 
+		reader := driver.NewLimitedUploadStream(ctx, stream)
 		for id := 0; id < u.Chunks(); id++ {
 			if utils.IsCanceled(ctx) {
 				return ctx.Err()
@@ -157,7 +166,7 @@ func (d *Mega) Put(ctx context.Context, dstDir model.Obj, stream model.FileStrea
 				return err
 			}
 			chunk := make([]byte, chkSize)
-			n, err := io.ReadFull(stream, chunk)
+			n, err := io.ReadFull(reader, chunk)
 			if err != nil && err != io.EOF {
 				return err
 			}
@@ -169,7 +178,7 @@ func (d *Mega) Put(ctx context.Context, dstDir model.Obj, stream model.FileStrea
 			if err != nil {
 				return err
 			}
-			up(id * 100 / u.Chunks())
+			up(float64(id) * 100 / float64(u.Chunks()))
 		}
 
 		_, err = u.Finish()

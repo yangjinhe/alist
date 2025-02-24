@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"crypto/subtle"
+	"github.com/alist-org/alist/v3/internal/stream"
+	"github.com/alist-org/alist/v3/server/middlewares"
 	"net/http"
 	"path"
 	"strings"
@@ -11,7 +13,6 @@ import (
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/internal/op"
 	"github.com/alist-org/alist/v3/internal/setting"
-	"github.com/alist-org/alist/v3/pkg/utils"
 	"github.com/alist-org/alist/v3/server/webdav"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
@@ -28,8 +29,10 @@ func WebDav(dav *gin.RouterGroup) {
 		},
 	}
 	dav.Use(WebDAVAuth)
-	dav.Any("/*path", ServeWebDAV)
-	dav.Any("", ServeWebDAV)
+	uploadLimiter := middlewares.UploadRateLimiter(stream.ClientUploadLimit)
+	downloadLimiter := middlewares.DownloadRateLimiter(stream.ClientDownloadLimit)
+	dav.Any("/*path", uploadLimiter, downloadLimiter, ServeWebDAV)
+	dav.Any("", uploadLimiter, downloadLimiter, ServeWebDAV)
 	dav.Handle("PROPFIND", "/*path", ServeWebDAV)
 	dav.Handle("PROPFIND", "", ServeWebDAV)
 	dav.Handle("MKCOL", "/*path", ServeWebDAV)
@@ -51,6 +54,7 @@ func WebDAVAuth(c *gin.Context) {
 	username, password, ok := c.Request.BasicAuth()
 	if !ok {
 		bt := c.GetHeader("Authorization")
+		log.Debugf("[webdav auth] token: %s", bt)
 		if strings.HasPrefix(bt, "Bearer") {
 			bt = strings.TrimPrefix(bt, "Bearer ")
 			token := setting.GetStr(conf.Token)
@@ -98,12 +102,27 @@ func WebDAVAuth(c *gin.Context) {
 		c.Abort()
 		return
 	}
-	if !user.CanWebdavManage() && utils.SliceContains([]string{"PUT", "DELETE", "PROPPATCH", "MKCOL", "COPY", "MOVE"}, c.Request.Method) {
-		if c.Request.Method == "OPTIONS" {
-			c.Set("user", guest)
-			c.Next()
-			return
-		}
+	if (c.Request.Method == "PUT" || c.Request.Method == "MKCOL") && (!user.CanWebdavManage() || !user.CanWrite()) {
+		c.Status(http.StatusForbidden)
+		c.Abort()
+		return
+	}
+	if c.Request.Method == "MOVE" && (!user.CanWebdavManage() || (!user.CanMove() && !user.CanRename())) {
+		c.Status(http.StatusForbidden)
+		c.Abort()
+		return
+	}
+	if c.Request.Method == "COPY" && (!user.CanWebdavManage() || !user.CanCopy()) {
+		c.Status(http.StatusForbidden)
+		c.Abort()
+		return
+	}
+	if c.Request.Method == "DELETE" && (!user.CanWebdavManage() || !user.CanRemove()) {
+		c.Status(http.StatusForbidden)
+		c.Abort()
+		return
+	}
+	if c.Request.Method == "PROPPATCH" && !user.CanWebdavManage() {
 		c.Status(http.StatusForbidden)
 		c.Abort()
 		return

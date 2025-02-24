@@ -3,7 +3,6 @@ package crypt
 import (
 	"context"
 	"fmt"
-	"github.com/alist-org/alist/v3/internal/stream"
 	"io"
 	stdpath "path"
 	"regexp"
@@ -14,8 +13,11 @@ import (
 	"github.com/alist-org/alist/v3/internal/fs"
 	"github.com/alist-org/alist/v3/internal/model"
 	"github.com/alist-org/alist/v3/internal/op"
+	"github.com/alist-org/alist/v3/internal/sign"
+	"github.com/alist-org/alist/v3/internal/stream"
 	"github.com/alist-org/alist/v3/pkg/http_range"
 	"github.com/alist-org/alist/v3/pkg/utils"
+	"github.com/alist-org/alist/v3/server/common"
 	rcCrypt "github.com/rclone/rclone/backend/crypt"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/obscure"
@@ -54,6 +56,8 @@ func (d *Crypt) Init(ctx context.Context) error {
 	if !isCryptExt(d.EncryptedSuffix) {
 		return fmt.Errorf("EncryptedSuffix is Illegal")
 	}
+	d.FileNameEncoding = utils.GetNoneEmpty(d.FileNameEncoding, "base64")
+	d.EncryptedSuffix = utils.GetNoneEmpty(d.EncryptedSuffix, ".bin")
 
 	op.MustSaveDriverStorage(d)
 
@@ -71,7 +75,7 @@ func (d *Crypt) Init(ctx context.Context) error {
 		"password2":                 p2,
 		"filename_encryption":       d.FileNameEnc,
 		"directory_name_encryption": d.DirNameEnc,
-		"filename_encoding":         "base64",
+		"filename_encoding":         d.FileNameEncoding,
 		"suffix":                    d.EncryptedSuffix,
 		"pass_bad_blocks":           "",
 	}
@@ -121,6 +125,9 @@ func (d *Crypt) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 				//filter illegal files
 				continue
 			}
+			if !d.ShowHidden && strings.HasPrefix(name, ".") {
+				continue
+			}
 			objRes := model.Object{
 				Name:     name,
 				Size:     0,
@@ -142,6 +149,9 @@ func (d *Crypt) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 				//filter illegal files
 				continue
 			}
+			if !d.ShowHidden && strings.HasPrefix(name, ".") {
+				continue
+			}
 			objRes := model.Object{
 				Name:     name,
 				Size:     size,
@@ -150,7 +160,14 @@ func (d *Crypt) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([
 				Ctime:    obj.CreateTime(),
 				// discarding hash as it's encrypted
 			}
-			if !ok {
+			if d.Thumbnail && thumb == "" {
+				thumbPath := stdpath.Join(args.ReqPath, ".thumbnails", name+".webp")
+				thumb = fmt.Sprintf("%s/d%s?sign=%s",
+					common.GetApiUrl(common.GetHttpReq(ctx)),
+					utils.EncodePath(thumbPath, true),
+					sign.Sign(thumbPath))
+			}
+			if !ok && !d.Thumbnail {
 				result = append(result, &objRes)
 			} else {
 				objWithThumb := model.ObjThumb{
@@ -258,7 +275,6 @@ func (d *Crypt) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 			rrc = converted
 		}
 		if rrc != nil {
-			//remoteRangeReader, err :=
 			remoteReader, err := rrc.RangeRead(ctx, http_range.Range{Start: underlyingOffset, Length: length})
 			remoteClosers.AddClosers(rrc.GetClosers())
 			if err != nil {
@@ -271,10 +287,8 @@ func (d *Crypt) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (
 			if err != nil {
 				return nil, err
 			}
-			//remoteClosers.Add(remoteLink.MFile)
-			//keep reuse same MFile and close at last.
-			remoteClosers.Add(remoteLink.MFile)
-			return io.NopCloser(remoteLink.MFile), nil
+			// 可以直接返回，读取完也不会调用Close，直到连接断开Close
+			return remoteLink.MFile, nil
 		}
 
 		return nil, errs.NotSupport
@@ -377,10 +391,11 @@ func (d *Crypt) Put(ctx context.Context, dstDir model.Obj, streamer model.FileSt
 			Modified: streamer.ModTime(),
 			IsFolder: streamer.IsDir(),
 		},
-		Reader:       wrappedIn,
-		Mimetype:     "application/octet-stream",
-		WebPutAsTask: streamer.NeedStore(),
-		Exist:        streamer.GetExist(),
+		Reader:            wrappedIn,
+		Mimetype:          "application/octet-stream",
+		WebPutAsTask:      streamer.NeedStore(),
+		ForceStreamUpload: true,
+		Exist:             streamer.GetExist(),
 	}
 	err = op.Put(ctx, d.remoteStorage, dstDirActualPath, streamOut, up, false)
 	if err != nil {

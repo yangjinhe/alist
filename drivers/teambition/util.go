@@ -1,6 +1,7 @@
 package teambition
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -120,25 +121,31 @@ func (d *Teambition) getFiles(parentId string) ([]model.Obj, error) {
 	return files, nil
 }
 
-func (d *Teambition) upload(ctx context.Context, file model.FileStreamer, token string) (*FileUpload, error) {
+func (d *Teambition) upload(ctx context.Context, file model.FileStreamer, token string, up driver.UpdateProgress) (*FileUpload, error) {
 	prefix := "tcs"
 	if d.isInternational() {
 		prefix = "us-tcs"
 	}
+	reader := driver.NewLimitedUploadStream(ctx, &driver.ReaderUpdatingProgress{
+		Reader:         file,
+		UpdateProgress: up,
+	})
 	var newFile FileUpload
-	_, err := base.RestyClient.R().
+	res, err := base.RestyClient.R().
 		SetContext(ctx).
 		SetResult(&newFile).SetHeader("Authorization", token).
 		SetMultipartFormData(map[string]string{
-			"name": file.GetName(),
-			"type": file.GetMimetype(),
-			"size": strconv.FormatInt(file.GetSize(), 10),
-			//"lastModifiedDate": "",
-		}).SetMultipartField("file", file.GetName(), file.GetMimetype(), file).
+			"name":             file.GetName(),
+			"type":             file.GetMimetype(),
+			"size":             strconv.FormatInt(file.GetSize(), 10),
+			"lastModifiedDate": time.Now().Format("Mon Jan 02 2006 15:04:05 GMT+0800 (中国标准时间)"),
+		}).
+		SetMultipartField("file", file.GetName(), file.GetMimetype(), reader).
 		Post(fmt.Sprintf("https://%s.teambition.net/upload", prefix))
 	if err != nil {
 		return nil, err
 	}
+	log.Debugf("[teambition] upload response: %s", res.String())
 	return &newFile, nil
 }
 
@@ -182,14 +189,13 @@ func (d *Teambition) chunkUpload(ctx context.Context, file model.FileStreamer, t
 				"Authorization": token,
 				"Content-Type":  "application/octet-stream",
 				"Referer":       referer,
-			}).SetBody(chunkData).Post(u)
+			}).
+			SetBody(driver.NewLimitedUploadStream(ctx, bytes.NewReader(chunkData))).
+			Post(u)
 		if err != nil {
 			return nil, err
 		}
-		if err != nil {
-			return nil, err
-		}
-		up(i * 100 / newChunk.Chunks)
+		up(float64(i) * 100 / float64(newChunk.Chunks))
 	}
 	_, err = base.RestyClient.R().SetHeader("Authorization", token).Post(
 		fmt.Sprintf("https://%s.teambition.net/upload/chunk/%s",
@@ -243,12 +249,18 @@ func (d *Teambition) newUpload(ctx context.Context, dstDir model.Obj, stream mod
 		return err
 	}
 	uploader := s3manager.NewUploader(ss)
+	if stream.GetSize() > s3manager.MaxUploadParts*s3manager.DefaultUploadPartSize {
+		uploader.PartSize = stream.GetSize() / (s3manager.MaxUploadParts - 1)
+	}
 	input := &s3manager.UploadInput{
 		Bucket:             &uploadToken.Upload.Bucket,
 		Key:                &uploadToken.Upload.Key,
 		ContentDisposition: &uploadToken.Upload.ContentDisposition,
 		ContentType:        &uploadToken.Upload.ContentType,
-		Body:               stream,
+		Body: driver.NewLimitedUploadStream(ctx, &driver.ReaderUpdatingProgress{
+			Reader:         stream,
+			UpdateProgress: up,
+		}),
 	}
 	_, err = uploader.UploadWithContext(ctx, input)
 	if err != nil {

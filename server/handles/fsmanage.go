@@ -2,6 +2,7 @@ package handles
 
 import (
 	"fmt"
+	"github.com/alist-org/alist/v3/internal/task"
 	"io"
 	stdpath "path"
 
@@ -55,9 +56,10 @@ func FsMkdir(c *gin.Context) {
 }
 
 type MoveCopyReq struct {
-	SrcDir string   `json:"src_dir"`
-	DstDir string   `json:"dst_dir"`
-	Names  []string `json:"names"`
+	SrcDir    string   `json:"src_dir"`
+	DstDir    string   `json:"dst_dir"`
+	Names     []string `json:"names"`
+	Overwrite bool     `json:"overwrite"`
 }
 
 func FsMove(c *gin.Context) {
@@ -84,6 +86,14 @@ func FsMove(c *gin.Context) {
 	if err != nil {
 		common.ErrorResp(c, err, 403)
 		return
+	}
+	if !req.Overwrite {
+		for _, name := range req.Names {
+			if res, _ := fs.Get(c, stdpath.Join(dstDir, name), &fs.GetArgs{NoLog: true}); res != nil {
+				common.ErrorStrResp(c, fmt.Sprintf("file [%s] exists", name), 403)
+				return
+			}
+		}
 	}
 	for i, name := range req.Names {
 		err := fs.Move(c, stdpath.Join(srcDir, name), dstDir, len(req.Names) > i+1)
@@ -120,27 +130,34 @@ func FsCopy(c *gin.Context) {
 		common.ErrorResp(c, err, 403)
 		return
 	}
-	var addedTask []string
+	if !req.Overwrite {
+		for _, name := range req.Names {
+			if res, _ := fs.Get(c, stdpath.Join(dstDir, name), &fs.GetArgs{NoLog: true}); res != nil {
+				common.ErrorStrResp(c, fmt.Sprintf("file [%s] exists", name), 403)
+				return
+			}
+		}
+	}
+	var addedTasks []task.TaskExtensionInfo
 	for i, name := range req.Names {
-		ok, err := fs.Copy(c, stdpath.Join(srcDir, name), dstDir, len(req.Names) > i+1)
-		if ok {
-			addedTask = append(addedTask, name)
+		t, err := fs.Copy(c, stdpath.Join(srcDir, name), dstDir, len(req.Names) > i+1)
+		if t != nil {
+			addedTasks = append(addedTasks, t)
 		}
 		if err != nil {
 			common.ErrorResp(c, err, 500)
 			return
 		}
 	}
-	if len(addedTask) > 0 {
-		common.SuccessResp(c, fmt.Sprintf("Added %d tasks", len(addedTask)))
-	} else {
-		common.SuccessResp(c)
-	}
+	common.SuccessResp(c, gin.H{
+		"tasks": getTaskInfos(addedTasks),
+	})
 }
 
 type RenameReq struct {
-	Path string `json:"path"`
-	Name string `json:"name"`
+	Path      string `json:"path"`
+	Name      string `json:"name"`
+	Overwrite bool   `json:"overwrite"`
 }
 
 func FsRename(c *gin.Context) {
@@ -158,6 +175,15 @@ func FsRename(c *gin.Context) {
 	if err != nil {
 		common.ErrorResp(c, err, 403)
 		return
+	}
+	if !req.Overwrite {
+		dstPath := stdpath.Join(stdpath.Dir(reqPath), req.Name)
+		if dstPath != reqPath {
+			if res, _ := fs.Get(c, dstPath, &fs.GetArgs{NoLog: true}); res != nil {
+				common.ErrorStrResp(c, fmt.Sprintf("file [%s] exists", req.Name), 403)
+				return
+			}
+		}
 	}
 	if err := fs.Rename(c, reqPath, req.Name); err != nil {
 		common.ErrorResp(c, err, 500)
